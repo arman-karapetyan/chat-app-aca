@@ -1,0 +1,35 @@
+DO
+$$
+    DECLARE
+        db_name TEXT := current_database();
+        app_user TEXT := '${APP_DB_USER}';
+        app_pass TEXT := '${APP_DB_PASSWORD}';
+
+BEGIN
+        IF
+app_user IS NULL OR app_pass IS NULL OR app_user = '' OR app_pass = '' THEN
+           RAISE EXCEPTION 'APP_DB_USER and APP_DB_PASSWORD must be set';
+END IF;
+        
+        -- Create application user if not exists
+        IF
+NOT EXISTS (
+           SELECT 1 FROM pg_roles WHERE rolname = app_user
+           ) THEN
+                EXECUTE format('CREATE USER %I WITH PASSWORD %L', app_user, app_pass);
+END IF;
+
+        -- Grant privileges on the current database
+        EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', db_name, app_user);
+END
+$$;
+
+-- Grant schema privileges
+GRANT ALL ON SCHEMA public TO ${APP_DB_USER};
+          
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${APP_DB_USER};
+      
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${APP_DB_USER};
+      
+-- Enable extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
