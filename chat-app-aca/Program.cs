@@ -17,8 +17,14 @@ class Program
     private static IDbConnectionFactory _dbConnectionFactory;
     private static AuthService _authService;
     private static UserService _userService;
+    private static ChatService _chatService;
+    private static InvitationService _invitationService;
+    private static PollingService _pollingService;
+    private static MessageService _messageService;
 
     private static UserAccount? _currentUser;
+
+    private static CancellationTokenSource _pollingCts;
 
     static async Task Main(string[] args)
     {
@@ -64,10 +70,107 @@ class Program
                 await ListUsers();
                 break;
 
+            case "4":
+                await CreateChat();
+                break;
+
+            case "5":
+                await ListMyChats();
+                break;
+
+            case "6":
+                await EnterChat();
+                break;
+
+            case "7":
+                await InviteUser();
+                break;
+
+            case "8":
+                await RespondInvite();
+                break;
+
+
             case "0":
                 Logout();
                 break;
         }
+    }
+
+    private static async Task EnterChat()
+    {
+        if (_currentUser == null)
+        {
+            Console.WriteLine("Not authenticated!");
+            return;
+        }
+
+        Console.Write("Chat Id: ");
+        var chatId = Guid.Parse(Console.ReadLine());
+        Console.WriteLine("Type messages. '/exit' to leave chat.");
+
+        long lastTimestamp = 0;
+        using var cts = new CancellationTokenSource();
+        var pollTask = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var messages = await _messageService.GetMessagesAsync(chatId, lastTimestamp, cts.Token);
+                foreach (Message message in messages)
+                {
+                    var sender = message.SenderId == null
+                        ? "[system]"
+                        : $"@{message.SenderUsername}";
+
+                    Console.WriteLine(
+                        $"{message.CreatedAt.FromMs():yyyy-MM-dd HH:mm:ss}\t| {sender}:\t{message.Content}");
+                    lastTimestamp = Math.Max(lastTimestamp, message.CreatedAt);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
+            }
+        }, cts.Token);
+
+
+        while (true)
+        {
+            var text = Console.ReadLine();
+            if (text == "/exit")
+            {
+                await cts.CancelAsync();
+                break;
+            }
+
+            await _messageService.SendMessageAsync(chatId, _currentUser.Id, text, cts.Token);
+        }
+
+        await pollTask;
+    }
+
+    private static async Task InviteUser()
+    {
+        if (_currentUser == null)
+        {
+            Console.WriteLine("Not authenticated!");
+            return;
+        }
+
+        Console.Write("Chat Id: ");
+        var chatId = Guid.Parse(Console.ReadLine());
+        Console.Write("Invite @username: ");
+        var username = Console.ReadLine().TrimStart('@');
+        await _invitationService.InviteAsync(chatId, _currentUser.Id, username);
+        Console.WriteLine("Invitation sent successfully!");
+    }
+
+    private static async Task RespondInvite()
+    {
+        Console.Write("Invitation Id: ");
+        var inviteId = Guid.Parse(Console.ReadLine());
+        Console.Write("Accept (y/n): ");
+        var accept = Console.ReadLine().ToLower() == "y";
+        await _invitationService.RespondAsync(inviteId, accept);
+        Console.WriteLine("Response saved!");
     }
 
     private static async Task ShowMyAccount()
@@ -155,7 +258,7 @@ class Program
         foreach (var user in users)
         {
             Console.WriteLine(
-                $"{user.Username}\t" +
+                $"@{user.Username}\t" +
                 $"{user.FirstName} {user.LastName}\t" +
                 $"{user.Email}\t" +
                 $"created: {user.CreatedAt.FromMs():yyyy-MM-dd HH:mm}\t" +
@@ -164,8 +267,47 @@ class Program
         }
     }
 
+    private static async Task CreateChat()
+    {
+        if (_currentUser == null)
+        {
+            Console.WriteLine("Not authenticated!");
+            return;
+        }
+
+        Console.Write("Chat title: ");
+        var title = Console.ReadLine();
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            Console.WriteLine("Chat title cannot be empty!");
+            return;
+        }
+
+        var chatId = await _chatService.CreateChatAsync(_currentUser.Id, title);
+        Console.WriteLine($"Chat created successfully. Id: {chatId}");
+    }
+
+    private static async Task ListMyChats()
+    {
+        if (_currentUser == null)
+        {
+            Console.WriteLine("Not authenticated!");
+            return;
+        }
+
+        Console.WriteLine("==== MY CHATS ====");
+
+        var chats = await _chatService.GetMyChatsAsync(_currentUser.Id);
+        foreach (Chat chat in chats)
+        {
+            Console.WriteLine($"{chat.Id}\t{chat.Title}\t{chat.CreatedAt.FromMs():yyyy-MM-dd HH:mm}");
+        }
+    }
+
     private static void Logout()
     {
+        _pollingCts?.Cancel();
+        _pollingCts?.Dispose();
         _currentUser = null;
         Console.WriteLine("Logged out successfully!");
     }
@@ -188,10 +330,10 @@ class Program
         Console.WriteLine("2. Update my account");
         Console.WriteLine("3. List users");
         Console.WriteLine("4. Create chat");
-        Console.WriteLine("5. Invite user (@username)");
-        Console.WriteLine("6. Respond to invite");
-        Console.WriteLine("7. List my chats");
-        Console.WriteLine("8. Enter chat");
+        Console.WriteLine("5. List my chats");
+        Console.WriteLine("6. Enter chat");
+        Console.WriteLine("7. Invite user (@username)");
+        Console.WriteLine("8. Respond to invite");
         Console.WriteLine("9. Delete chat (owner only)");
         Console.WriteLine("0. Logout");
     }
@@ -293,9 +435,11 @@ class Program
             return;
         }
 
+        Console.WriteLine("Logged in successfully!");
         // handle other things.....
 
-        Console.WriteLine("Logged in successfully!");
+        _pollingCts = new CancellationTokenSource();
+        _ = Task.Run(() => _pollingService.PoolInvitesAsync(_currentUser.Id, _pollingCts.Token));
     }
 
     private static void InitializeServices()
@@ -303,5 +447,9 @@ class Program
         _dbConnectionFactory = new PgDbConnectionFactory(ConnectionString);
         _authService = new AuthService(_dbConnectionFactory);
         _userService = new UserService(_dbConnectionFactory);
+        _chatService = new ChatService(_dbConnectionFactory);
+        _invitationService = new InvitationService(_dbConnectionFactory);
+        _pollingService = new PollingService(_dbConnectionFactory);
+        _messageService = new MessageService(_dbConnectionFactory);
     }
 }
